@@ -7,6 +7,7 @@ class TransitionNet(torch.nn.Module):
         self.fc2 = torch.nn.Linear(hs, hs)
         self.relu = torch.nn.ReLU()
         self.bn = torch.nn.BatchNorm1d(hs)
+        self.ln = torch.nn.LayerNorm(hs)
         if cov_type=='diag': #one std-dev parameter for each dim
             self.fc3 = torch.nn.Linear(hs, 2*ns)
         elif cov_type=='scalar': #uniform standard deviation
@@ -22,7 +23,7 @@ class TransitionNet(torch.nn.Module):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
-        x = self.bn(x)
+        x = self.ln(x)
         x = self.relu(x)
         x = self.fc3(x)
         return x
@@ -34,6 +35,7 @@ class RewardNet(torch.nn.Module):
         self.fc2 = torch.nn.Linear(hs, hs)
         self.relu = torch.nn.ReLU()
         self.bn = torch.nn.BatchNorm1d(hs)
+        self.ln = torch.nn.LayerNorm(hs)
         if cov:
             self.fc3 = torch.nn.Linear(hs,2)
         else:
@@ -43,7 +45,7 @@ class RewardNet(torch.nn.Module):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
-        x = self.bn(x)
+        x = self.ln(x)
         x = self.relu(x)
         x = self.fc3(x)
         return x

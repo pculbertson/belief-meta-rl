@@ -4,13 +4,14 @@ from utils import get_batch_mvnormal, get_cov_mat
 
 class RandomShooting():
     """implements random shooting for MBRL"""
-    def __init__(self, transition, reward, action_dist, num_traj, traj_length, ns, t_cov_type, r_cov, det=False):
+    def __init__(self, transition, reward, action_dist, num_traj, traj_length, ns, na, t_cov_type, r_cov, det=False):
         self._transition = transition
         self._reward = reward
         self._action_dist = action_dist
         self._num_traj = num_traj
         self._traj_length = traj_length
         self._ns = ns
+        self._na = na
         self._t_cov_type = t_cov_type
         self._r_cov = r_cov
         self._det = det
@@ -20,10 +21,9 @@ class RandomShooting():
         states = torch.zeros([self._num_traj,self._ns,self._traj_length])
         states[:,:,0] = torch.from_numpy(state).float()
         if type(self._action_dist) == torch.distributions.Categorical:
-            actions = self._action_dist.sample([self._traj_length-1]).view(self._num_traj,1,self._traj_length-1)
+            actions = self._action_dist.expand((self._num_traj,1)).sample([self._traj_length-1]).view(self._num_traj,1,self._traj_length-1)
         else:
-            #THIS IS WRONG, need middle dim to be dim_action
-            actions = self._action_dist.rsample([self._traj_length-1]).view(self._num_traj,1,self._traj_length-1)
+            actions = self._action_dist.expand((self._num_traj,1)).sample([self._traj_length-1]).view(self._num_traj,self._na,self._traj_length-1)
         rewards = torch.zeros([self._num_traj,self._traj_length-1])
         for i in range(self._traj_length-1):
             if type(self._action_dist) == torch.distributions.Categorical:
@@ -32,8 +32,8 @@ class RandomShooting():
                 actions_input = actions[:,:,i]
             #print((states[:,:,i].shape,actions_input.shape))
             states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i],actions_input)
-        avg_reward = torch.mean(rewards,1)
-        best_traj = torch.argmax(avg_reward)
+        total_reward = torch.sum(rewards,1)
+        best_traj = torch.argmax(total_reward)
         return actions[best_traj,:,0].numpy()
         
         
@@ -59,7 +59,7 @@ class RandomShooting():
     
 class CrossEntropy():
     """implements cross-entropy method for MBRL"""
-    def __init__(self, transition, reward, action_dists, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov):
+    def __init__(self, transition, reward, action_dists, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov, max_logvar):
         self._transition = transition
         self._reward = reward
         self._action_dists = action_dists #list of action distributions
@@ -72,6 +72,7 @@ class CrossEntropy():
         self._na = na
         self._t_cov_type = t_cov_type
         self._r_cov = r_cov
+        self._max_logvar = max_logvar
         if type(self._action_dists[0]) == torch.distributions.Categorical:
             self._discrete_action = True
         else:
@@ -91,8 +92,8 @@ class CrossEntropy():
             for i in range(self._traj_length-1):
                 states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i],actions[:,:,i])
             #take elite fraction, refit action distributions
-            average_rew = torch.mean(rewards,1)
-            elite_indices = torch.argsort(average_rew,descending=True)[:self._num_elite]
+            total_rew = torch.sum(rewards,1)
+            elite_indices = torch.argsort(total_rew,descending=True)[:self._num_elite]
             #print(iteration,torch.mean(average_rew),torch.mean(average_rew[elite_indices]))
             curr_action_dist = self._fit_action_dists(actions[elite_indices,:,:])
         return curr_action_dist
@@ -109,12 +110,14 @@ class CrossEntropy():
             r_outs = self._reward(ins)
             
             t_means, t_covs = t_out[:,:self._ns], t_out[:,self._ns:]
-            cov_mat = get_cov_mat(t_covs,self._ns,self._t_cov_type)
+            t_covs_clamped = torch.clamp(t_covs,-self._max_logvar,self._max_logvar)
+            cov_mat = get_cov_mat(t_covs_clamped,self._ns,self._t_cov_type)
             
             sp = t_means + torch.squeeze(torch.matmul(cov_mat,torch.randn_like(t_means).view(self._num_traj,self._ns,1)))
             
             if self._r_cov:
-                rews = torch.distributions.Normal(r_outs[:,0],r_outs[:,1]**2).rsample()
+                r_logvar_clamped = torch.clamp(r_outs[:,1],-self._max_logvar,self._max_logvar)
+                rews = torch.distributions.Normal(r_outs[:,0],torch.exp(r_logvar_clamped)).rsample()
             else:
                 rews = r_outs
             

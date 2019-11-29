@@ -59,7 +59,7 @@ class ReplayBuffer:
 def get_batch_mvnormal(means, covs, cov_type='diag'):
     """return torch multivariate normal for sampling/prob evaluation"""
     if cov_type=='diag':
-        cov_mat = torch.diag_embed(covs**2)
+        cov_mat = torch.diag_embed(torch.exp(covs))
         batch_mvnormal = torch.distributions.MultivariateNormal(means,cov_mat)
     elif cov_type=='dense':
         batch_size, ns = covs.shape[0], means.shape[1]
@@ -68,7 +68,7 @@ def get_batch_mvnormal(means, covs, cov_type='diag'):
         batch_mvnormal = torch.distributions.MultivariateNormal(means,scale_tril=cov_mat)
     elif cov_type=='scalar':
         batch_size, ns = covs.shape[0], means.shape[1]
-        cov_mat = (covs**2).reshape(batch_size,1,1)*torch.eye(ns)
+        cov_mat = torch.exp(covs).reshape(batch_size,1,1)*torch.eye(ns)
         batch_mvnormal = torch.distributions.MultivariateNormal(means,cov_mat)
     elif cov_type=='fixed':
         cov_mat = covs
@@ -77,17 +77,17 @@ def get_batch_mvnormal(means, covs, cov_type='diag'):
 
 def get_cov_mat(covs, ns, cov_type='diag'):
     if cov_type=='diag':
-        cov_mat = torch.diag_embed(covs**2)
+        cov_mat = torch.diag_embed(torch.exp(covs))
     elif cov_type=='dense':
         batch_size = covs.shape[0]
         cov_mat = torch.zeros(batch_size,ns,ns)
         cov_mat[:,torch.tril(torch.ones(ns,ns))==1] = covs
     elif cov_type=='scalar':
         batch_size = covs.shape[0]
-        cov_mat = (covs**2).reshape(batch_size,1,1)*torch.eye(ns)
+        cov_mat = (torch.exp(covs)).reshape(batch_size,1,1)*torch.eye(ns)
     elif cov_type=='fixed':
         cov_size = 1e-2
-        cov_mat = 1e-2*torch.eye(ns)
+        cov_mat = cov_size*torch.eye(ns)
     return cov_mat
     
 def log_transition_probs(means, covs, ops, cov_type='diag'):
@@ -96,7 +96,7 @@ def log_transition_probs(means, covs, ops, cov_type='diag'):
     return batch_mvnormal.log_prob(ops)
 
 def log_rew_probs(means, covs, rews):
-    dists = torch.distributions.Normal(means,covs**2)
+    dists = torch.distributions.Normal(means,torch.exp(covs))
     return dists.log_prob(rews)
 
 def eval_policy(env,policy,init_action_dist,traj_length,discrete_actions,num_evals):

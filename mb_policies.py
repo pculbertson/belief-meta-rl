@@ -59,7 +59,7 @@ class RandomShooting():
     
 class CrossEntropy():
     """implements cross-entropy method for MBRL"""
-    def __init__(self, transition, reward, action_dists, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov, max_logvar):
+    def __init__(self, transition, reward, action_dists, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov, max_logvar, device):
         self._transition = transition
         self._reward = reward
         self._action_dists = action_dists #list of action distributions
@@ -73,20 +73,22 @@ class CrossEntropy():
         self._t_cov_type = t_cov_type
         self._r_cov = r_cov
         self._max_logvar = max_logvar
+        self._device = device
         if type(self._action_dists[0]) == torch.distributions.Categorical:
             self._discrete_action = True
         else:
             self._discrete_action = False
         
     def new_action_dist(self, state):
+        curr_action_dist = self._action_dists
         for iteration in range(self._num_iters):
             states = torch.zeros([self._num_traj,self._ns,self._traj_length])
-            states[:,:,0] = torch.from_numpy(state).float()
+            states[:,:,0] = torch.from_numpy(state).float().to(self._device)
             #sample action distribution
             if self._discrete_action:
-                actions = torch.cat([dist.expand((self._num_traj,1)).sample() for dist in self._action_dists],axis=1)
+                actions = torch.cat([dist.expand((self._num_traj,1)).sample() for dist in curr_action_dist],axis=1)
             else:
-                actions = torch.cat([dist.expand((self._num_traj,self._na)).rsample() for dist in self._action_dists],axis=1).view(self._num_traj,self._na,self._traj_length-1)
+                actions = torch.cat([dist.expand((self._num_traj,self._na)).rsample() for dist in curr_action_dist],axis=1).view(self._num_traj,self._na,self._traj_length-1)
             #shoot trajectories forward, get rewards
             rewards = torch.zeros([self._num_traj,self._traj_length-1])
             for i in range(self._traj_length-1):
@@ -94,6 +96,8 @@ class CrossEntropy():
             #take elite fraction, refit action distributions
             total_rew = torch.sum(rewards,1)
             elite_indices = torch.argsort(total_rew,descending=True)[:self._num_elite]
+            #print(torch.mean(total_rew),torch.mean(total_rew[elite_indices]))
+            #print(iteration,torch.mean(total_rew))
             #print(iteration,torch.mean(average_rew),torch.mean(average_rew[elite_indices]))
             curr_action_dist = self._fit_action_dists(actions[elite_indices,:,:])
         return curr_action_dist
@@ -105,18 +109,18 @@ class CrossEntropy():
         if self._discrete_action:
             pass
         else:
-            ins = torch.cat((states,actions),axis=1)
+            ins = torch.cat((states,actions),axis=1).to(self._device)
             t_out = self._transition(ins)
             r_outs = self._reward(ins)
             
             t_means, t_covs = t_out[:,:self._ns], t_out[:,self._ns:]
-            t_covs_clamped = torch.clamp(t_covs,-self._max_logvar,self._max_logvar)
-            cov_mat = get_cov_mat(t_covs_clamped,self._ns,self._t_cov_type)
+            t_covs_clamped = torch.clamp(t_covs,-self._max_logvar,self._max_logvar).to(self._device)
+            cov_mat = get_cov_mat(t_covs_clamped,self._ns,self._t_cov_type,self._device)
             
             sp = t_means + torch.squeeze(torch.matmul(cov_mat,torch.randn_like(t_means).view(self._num_traj,self._ns,1)))
             
             if self._r_cov:
-                r_logvar_clamped = torch.clamp(r_outs[:,1],-self._max_logvar,self._max_logvar)
+                r_logvar_clamped = torch.clamp(r_outs[:,1],-self._max_logvar,self._max_logvar).to(self._device)
                 rews = torch.distributions.Normal(r_outs[:,0],torch.exp(r_logvar_clamped)).rsample()
             else:
                 rews = r_outs

@@ -6,7 +6,7 @@ from mb_policies import RandomShooting, CrossEntropy
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-env = gym.make('MountainCarContinuous-v0')
+env = gym.make('Pendulum-v0')
 #env = gym.make('SemisuperPendulumNoise-v0')
 if env.action_space.shape:
     dim_actions = env.action_space.shape[0]
@@ -60,8 +60,8 @@ else:
     init_action_dist = torch.distributions.Categorical(logits=torch.ones(env.action_space.n))
     action_dist = [init_action_dist]*(traj_length-1)
 
-#policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,det=True)
-policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
+policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
+#policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
 
 t_losses = np.array([])
 r_losses = np.array([])
@@ -99,21 +99,19 @@ for epoch in range(num_epochs):
     s, d, ep_rew = env.reset(), False, 0.
     dyn_error, rew_error = 0, 0
     while not d:
-        new_action_dist = policy.new_action_dist(np.array(s))
-        if discrete_actions:
-            a = new_action_dist.pop(0).sample().cpu().numpy()
-        else:
+        #new_action_dist = policy.new_action_dist(np.array(s))
+        #if discrete_actions:
+            #a = new_action_dist.pop(0).sample().cpu().numpy()
+        #else:
             #a = policy.new_action_dist(np.array(s))[0].rsample()
-            a = new_action_dist.pop(0).rsample().cpu().numpy()
+            #a = new_action_dist.pop(0).rsample().cpu().numpy()
             #a = new_action_dist[0].mean.cpu().numpy()
         #a = env.action_space.sample()
-        #a = policy.get_action(s)
+        a = policy.get_action(s)
         if env.action_space.shape:
             sp, r, d, _ = env.step(a) # take a random action
         else:
             sp, r, d, _ = env.step(int(a)) # take a random action
-        if global_iters > 400:
-            print(a)
         s_n = s+np.random.multivariate_normal(np.zeros(dim_obs),state_noise*np.eye(dim_obs))
         sp_n = sp+np.random.multivariate_normal(np.zeros(dim_obs),state_noise*np.eye(dim_obs))
         r_n = r+np.random.normal(0.,rew_noise)

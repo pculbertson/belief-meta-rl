@@ -4,7 +4,7 @@ from utils import get_batch_mvnormal, get_cov_mat
 
 class RandomShooting():
     """implements random shooting for MBRL"""
-    def __init__(self, transition, reward, action_dist, num_traj, traj_length, ns, na, t_cov_type, r_cov, det=False):
+    def __init__(self, transition, reward, action_dist, num_traj, traj_length, ns, na, t_cov_type, r_cov, max_logvar, device, det=False):
         self._transition = transition
         self._reward = reward
         self._action_dist = action_dist
@@ -14,12 +14,14 @@ class RandomShooting():
         self._na = na
         self._t_cov_type = t_cov_type
         self._r_cov = r_cov
+        self._max_logvar = max_logvar
+        self._device = device
         self._det = det
         
     def get_action(self, state):
         #states, rews, actions = [torch.from_numpy(state).float().repeat(self._num_traj,1)],[],[]
         states = torch.zeros([self._num_traj,self._ns,self._traj_length])
-        states[:,:,0] = torch.from_numpy(state).float()
+        states[:,:,0] = torch.from_numpy(state).float().to(self._device)
         if type(self._action_dist) == torch.distributions.Categorical:
             actions = self._action_dist.expand((self._num_traj,1)).sample([self._traj_length-1]).view(self._num_traj,1,self._traj_length-1)
         else:
@@ -39,19 +41,20 @@ class RandomShooting():
         
     def _next_state_rew(self, states, actions):
         """helper function to unroll dynamics (batched)"""
-        ins = torch.cat((states,actions),axis=1)
+        ins = torch.cat((states,actions),axis=1).to(self._device)
         t_outs = self._transition(ins)
         t_means, t_covs = t_outs[:,:self._ns], t_outs[:,self._ns:]
-        cov_mat = get_cov_mat(t_covs,self._ns,self._t_cov_type)
+        t_covs_clamped = torch.clamp(t_covs,-self._max_logvar,self._max_logvar).to(self._device)
+        cov_mat = get_cov_mat(t_covs,self._ns,self._t_cov_type,self._device)
         r_outs = self._reward(ins)
         if self._det:
             sp = t_means
             rews = r_outs
         else:
-            sp = t_means + torch.squeeze(torch.matmul(cov_mat,torch.randn_like(t_means).view(self._num_traj,self._ns,1)))
+            sp = t_means.to(self._device) + torch.squeeze(torch.matmul(cov_mat,torch.randn_like(t_means).view(self._num_traj,self._ns,1)))
             
             if self._r_cov:
-                rews = torch.distributions.Normal(r_outs[:,0],r_outs[:,1]**2).rsample()
+                rews = torch.distributions.Normal(r_outs[:,0],torch.exp(r_outs[:,1])).rsample()
             else:
                 rews = r_outs
         return (sp, torch.squeeze(rews))
@@ -96,9 +99,6 @@ class CrossEntropy():
             #take elite fraction, refit action distributions
             total_rew = torch.sum(rewards,1)
             elite_indices = torch.argsort(total_rew,descending=True)[:self._num_elite]
-            #print(torch.mean(total_rew),torch.mean(total_rew[elite_indices]))
-            #print(iteration,torch.mean(total_rew))
-            #print(iteration,torch.mean(average_rew),torch.mean(average_rew[elite_indices]))
             curr_action_dist = self._fit_action_dists(actions[elite_indices,:,:])
         return curr_action_dist
     

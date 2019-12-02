@@ -119,7 +119,8 @@ for epoch in range(num_epochs):
                 r_outs = rew_net(net_ins)
                 t_means, t_covs = t_outs[:,:dim_obs], t_outs[:,dim_obs:]
                 log_ts[i] = torch.sum(log_transition_probs(t_means,t_covs,sp,cov_type=trans_cov_type,device=device))
-                log_rs[i] = torch.sum(log_rew_probs(r_outs[:,0],r_outs[:,1],r))
+                #log_rs[i] = torch.sum(log_rew_probs(r_outs[:,0],r_outs[:,1],r))
+                log_rs[i] = torch.sum(torch.nn.MSELoss()(r_outs[:,0],r))
                 q_dist = torch.distributions.MultivariateNormal(batch_means[i],precision_matrix=batch_precs[i])
                 kl_divs[i] = torch.sum(torch.distributions.kl.kl_divergence(q_dist,latent_prior.expand([batch_length])))
             

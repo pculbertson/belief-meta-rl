@@ -42,7 +42,7 @@ def log_transition_probs(means, covs, ops, cov_type='diag',device="cpu"):
     return batch_mvnormal.log_prob(ops.to(device))
 
 def log_rew_probs(means, covs, rews):
-    dists = torch.distributions.Normal(means,torch.pow(covs,2))
+    dists = torch.distributions.Normal(means,torch.exp(covs))
     return dists.log_prob(rews)
 
 def product_of_gaussians(means,prec_mats):

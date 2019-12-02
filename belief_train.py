@@ -1,13 +1,10 @@
 import gym, torch
 import numpy as np
-from utils import ReplayBuffer, log_transition_probs, log_rew_probs, eval_policy
-from models import TransitionNet, RewardNet
-from mb_policies import RandomShooting, CrossEntropy
+from utils.buffer import ReplayBuffer
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-env = gym.make('Pendulum-v0')
-#env = gym.make('SemisuperPendulumNoise-v0')
+env = gym.make('MountainCar-v0')
 if env.action_space.shape:
     dim_actions = env.action_space.shape[0]
     discrete_actions = False
@@ -15,6 +12,8 @@ else:
     dim_actions = env.action_space.n
     discrete_actions = True
 dim_obs = env.observation_space.shape[0] if env.observation_space.shape else 1
+
+print(dim_actions, dim_obs)
 
 buffer_size = 10000
 if env.action_space.shape:
@@ -52,6 +51,9 @@ num_traj = 1000
 traj_length = 30
 num_iters = 5
 elite_frac = 0.1
+
+max_ep_length = 300
+random_episodes = 0
 
 if env.action_space.shape:
     init_action_dist = torch.distributions.MultivariateNormal(torch.zeros(dim_actions),torch.from_numpy((env.action_space.high-env.action_space.low)**2)*torch.eye(dim_actions))
@@ -98,7 +100,8 @@ for epoch in range(num_epochs):
     action_dist = [init_action_dist]*(traj_length-1)
     s, d, ep_rew = env.reset(), False, 0.
     dyn_error, rew_error = 0, 0
-    while not d:
+    ep_step = 0
+    while not d and ep_step < max_ep_length:
         #new_action_dist = policy.new_action_dist(np.array(s))
         #if discrete_actions:
             #a = new_action_dist.pop(0).sample().cpu().numpy()
@@ -107,7 +110,10 @@ for epoch in range(num_epochs):
             #a = new_action_dist.pop(0).rsample().cpu().numpy()
             #a = new_action_dist[0].mean.cpu().numpy()
         #a = env.action_space.sample()
-        a = policy.get_action(s)
+        if epoch < random_episodes:
+            a = np.array(env.action_space.sample())
+        else:
+            a = policy.get_action(s)
         if env.action_space.shape:
             sp, r, d, _ = env.step(a) # take a random action
         else:
@@ -117,7 +123,11 @@ for epoch in range(num_epochs):
         r_n = r+np.random.normal(0.,rew_noise)
         rb.add_sample(s_n,a,r_n,sp_n,d)
         
-        net_in = torch.cat((torch.from_numpy(s).float(),torch.from_numpy(a).float())).view(1,dim_obs+dim_actions).to(device)
+        if discrete_actions:
+            a_one_hot = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(a).long(),num_classes=dim_actions)).float()
+            net_in = torch.cat((torch.from_numpy(s).float(),a_one_hot)).view(1,dim_obs+dim_actions).to(device)
+        else:
+            net_in = torch.cat((torch.from_numpy(s).float(),torch.from_numpy(a).float())).view(1,dim_obs+dim_actions).to(device)
         t_out = torch.squeeze(trans_net(net_in))
         t_mean, t_cov =  t_out[:dim_obs], t_out[dim_obs:]
         r_out = torch.squeeze(rew_net(net_in))
@@ -143,6 +153,7 @@ for epoch in range(num_epochs):
                     
         ep_rew += r
         global_iters += 1
+        ep_step += 1
     rewards.append(ep_rew)
     print(rewards[-1],dyn_error,rew_error)
 env.close()

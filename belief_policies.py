@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from utils import get_batch_mvnormal, get_cov_mat
+from utils.distributions import get_batch_mvnormal, get_cov_mat
 
 class RandomShooting():
     """implements random shooting for MBRL"""

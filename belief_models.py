@@ -3,7 +3,7 @@ import torch
 class SingleEncoder(torch.nn.Module):
     """defines task encoder based on single-step transitions"""
     def __init__(self,ns,na,latent_dim,cov_type='diag',hs=500):
-        super(TransitionNet, self).__init__()
+        super(SingleEncoder, self).__init__()
         self.fc1 = torch.nn.Linear(2*ns+na+1, hs)
         self.fc2 = torch.nn.Linear(hs, hs)
         self.relu = torch.nn.ReLU()

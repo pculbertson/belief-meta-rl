@@ -2,6 +2,7 @@ import gym, torch, meta_env
 import numpy as np
 from utils.buffer import ReplayBuffer
 from belief_models import SingleEncoder, TransitionNet, RewardNet
+from utils.distributions import get_cov_mat, log_transition_probs, log_rew_probs, product_of_gaussians
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -25,14 +26,16 @@ else:
 #training hyperparameters
 num_epochs = 5000
 global_iters = 0
-num_train_steps = 50
+num_train_steps = 1
 max_logvar = 1.0
 state_noise = 1e-4
 rew_noise = 1e-4
 max_variance = 1.0
+random_episodes=num_epochs
+max_ep_length = 300
 
 #model hyperparameters
-trans_cov_type='scalar'
+trans_cov_type='diag'
 trans_hs=200
 
 rew_hs=200
@@ -74,6 +77,7 @@ losses = np.array([])
 rewards = []
 
 for epoch in range(num_epochs):
+    rb.new_episode()
     if epoch > 0:
         for step in range(num_train_steps):
             samps = rb.random_sequences(batch_size,batch_length)
@@ -82,14 +86,18 @@ for epoch in range(num_epochs):
             t_optimizer.zero_grad()
             r_optimizer.zero_grad()
             
-            kl_divs, log_ts, log_rs = torch.zeros(batch_size), torch.zero(batch_size), torch.zeros(batch_size)
+            kl_divs, log_ts, log_rs = torch.zeros(batch_size), torch.zeros(batch_size), torch.zeros(batch_size)
         
-            batch_means, batch_precs, batch_prod_means, batch_prod_precs = [], []
+            batch_means, batch_precs, batch_prod_means, batch_prod_precs = [], [], [], []
             for i in range(batch_size):
-                s,a,r,sp = [torch.from_numpy(samps[i][k]).float() for k in ['o','a','r','op']]
-                q_ins = torch.cat((s[:-1],a,r,s[1:]),axis=1)
+                s,a_rb,r,sp = [torch.from_numpy(samps[i][k]).float() for k in ['o','a','r','op']]
+                if discrete_actions:
+                    a = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(a_rb).long(),num_classes=dim_actions)).float()
+                else:
+                    a = a_rb
+                q_ins = torch.cat((s,a,r,sp),axis=1)
                 q_outs = encoder(q_ins)
-                q_means = q_outs[:,:latent_dim],
+                q_means = q_outs[:,:latent_dim]
                 q_precs = torch.inverse(get_cov_mat(q_outs[:,latent_dim:],dim_obs,encoder_cov_type,device))
                 batch_means.append(q_means)
                 batch_precs.append(q_precs)
@@ -99,73 +107,49 @@ for epoch in range(num_epochs):
                 
             means, precs = torch.stack(batch_prod_means), torch.stack(batch_prod_precs)
             
-            thetas = means + torch.matmul(torch.inverse(precs),torch.randn_like(means))  #shape: [BxL]
+            thetas = torch.squeeze(means + torch.matmul(torch.inverse(precs),torch.randn_like(means)))#shape: [BxL]
             for i in range(batch_size):
-                
+                s,a_rb,r,sp = [torch.from_numpy(samps[i][k]).float() for k in ['o','a','r','op']]
+                if discrete_actions:
+                    a = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(a_rb).long(),num_classes=dim_actions)).float()
+                else:
+                    a = a_rb
+                net_ins = torch.cat((s,a,thetas[i,:].expand(batch_length,latent_dim)),axis=1)
+                t_outs = trans_net(net_ins)
+                r_outs = rew_net(net_ins)
+                t_means, t_covs = t_outs[:,:dim_obs], t_outs[:,dim_obs:]
+                log_ts[i] = torch.sum(log_transition_probs(t_means,t_covs,sp,cov_type=trans_cov_type,device=device))
+                log_rs[i] = torch.sum(log_rew_probs(r_outs[:,0],r_outs[:,1],r))
+                q_dist = torch.distributions.MultivariateNormal(batch_means[i],precision_matrix=batch_precs[i])
+                kl_divs[i] = torch.sum(torch.distributions.kl.kl_divergence(q_dist,latent_prior.expand([batch_length])))
             
+            loss = torch.mean(kl_divs - log_ts - log_rs)
             
             loss.backward()
             
             q_optimizer.step()
             t_optimizer.step()
             r_optimizer.step()
+        losses = np.append(losses,loss.cpu().detach().numpy())
+        print(loss)
 
     s, d, ep_rew = env.reset(), False, 0.
     dyn_error, rew_error = 0, 0
     ep_step = 0
-    while not d:
-        #new_action_dist = policy.new_action_dist(np.array(s))
-        #if discrete_actions:
-            #a = new_action_dist.pop(0).sample().cpu().numpy()
-        #else:
-            #a = policy.new_action_dist(np.array(s))[0].rsample()
-            #a = new_action_dist.pop(0).rsample().cpu().numpy()
-            #a = new_action_dist[0].mean.cpu().numpy()
-        #a = env.action_space.sample()
+    while not d and ep_step < max_ep_length:
         if epoch < random_episodes:
             a = np.array(env.action_space.sample())
-        else:
-            a = policy.get_action(s)
-        if env.action_space.shape:
-            sp, r, d, _ = env.step(a) # take a random action
-        else:
-            sp, r, d, _ = env.step(int(a)) # take a random action
+        #else:
+            #a = policy.get_action(s)
+        sp, r, d, _ = env.step(a) # take a random action
         s_n = s+np.random.multivariate_normal(np.zeros(dim_obs),state_noise*np.eye(dim_obs))
         sp_n = sp+np.random.multivariate_normal(np.zeros(dim_obs),state_noise*np.eye(dim_obs))
         r_n = r+np.random.normal(0.,rew_noise)
         rb.add_sample(s_n,a,r_n,sp_n,d)
-        
-        if discrete_actions:
-            a_one_hot = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(a).long(),num_classes=dim_actions)).float()
-            net_in = torch.cat((torch.from_numpy(s).float(),a_one_hot)).view(1,dim_obs+dim_actions).to(device)
-        else:
-            net_in = torch.cat((torch.from_numpy(s).float(),torch.from_numpy(a).float())).view(1,dim_obs+dim_actions).to(device)
-        t_out = torch.squeeze(trans_net(net_in))
-        t_mean, t_cov =  t_out[:dim_obs], t_out[dim_obs:]
-        r_out = torch.squeeze(rew_net(net_in))
-        
-        dyn_error += torch.nn.MSELoss()(t_mean,torch.from_numpy(sp).float().to(device))
-        rew_error += torch.nn.MSELoss()(r_out,torch.from_numpy(np.array(r)).float().to(device))
-        
-        s = sp
-        
-        #action_dist.append(init_action_dist)
-        #policy.set_action_dist(action_dist)
-        
-        #if (rb.size() >= batch_size) and (global_iters % train_iters == 0):
-            #train transition model
-            
-            
-            #if global_iters % print_freq == 0:
-                #print(eval_policy(env,policy,init_action_dist,traj_length,discrete_actions,10))
-                #if rewards:
-                    #print(t_loss.data,r_loss.data, rewards[-1])
-                #else:
-                    #print(t_loss.data,r_loss.data)
                     
         ep_rew += r
         global_iters += 1
         ep_step += 1
+        s = sp
     rewards.append(ep_rew)
-    print(rewards[-1],dyn_error,rew_error)
 env.close()

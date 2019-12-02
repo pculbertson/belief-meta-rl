@@ -8,6 +8,7 @@ class ReplayBuffer:
         self._action_dim = action_dim
         self._max_replay_buffer_size = size = max_replay_buffer_size
         self._ep_starts = [] #list of episode start indices
+        self._active_ep = -1
         
         self._o = np.zeros((size, obs_dim))
         self._a = np.zeros((size, action_dim))
@@ -32,6 +33,7 @@ class ReplayBuffer:
         self._top = (self._top + 1) % self._max_replay_buffer_size
         if self._top in self._ep_starts:
             self._ep_starts.remove(self._top)
+            self._ep_starts.sort()
         if self._size < self._max_replay_buffer_size:
             self._size += 1
             
@@ -67,7 +69,7 @@ class ReplayBuffer:
         """samples batch of [batch_size] sequences; returns full episode if [seq_length] = -1"""
         sequences = []
         for i in range(batch_size):
-            ep_num = random.randint(0,len(self._ep_starts)-1) #choose random episode
+            ep_num = random.choice([x for x in range(len(self._ep_starts)) if x != self._active_ep]) #choose random episode
             ep_start = self._ep_starts[ep_num]
             if seq_length == -1: #full episode length
                 seq_start = ep_start
@@ -82,12 +84,12 @@ class ReplayBuffer:
             else: #fixed-length sequence
                 if (ep_num == len(self._ep_starts)-1):
                     if (self._size == self._max_replay_buffer_size): #buffer overflowing
-                        ep_length = self._size - ep_start + self.ep_starts[0]
+                        ep_length = self._size - ep_start + min(self._ep_starts[0],self._top)
                         if ep_length <= seq_length:
                             seq_length = ep_length
                             seq_start = ep_start
                         else:
-                            seq_start = random.choice(0,ep_length-seq_length)
+                            seq_start = random.choice(range(0,ep_length-seq_length))
                         ep_range = [n % self._size for n in range(seq_start,seq_start + seq_length)]
                     else:
                         ep_length = self._top - ep_start
@@ -106,3 +108,5 @@ class ReplayBuffer:
     def new_episode(self):
         """starts new episode in replay buffer"""
         self._ep_starts.append(self._top)
+        self._ep_starts.sort()
+        self._active_ep = self._ep_starts.index(self._top)

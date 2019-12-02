@@ -1,10 +1,12 @@
-import gym, torch
+import gym, torch, meta_env
 import numpy as np
 from utils.buffer import ReplayBuffer
+from belief_models import SingleEncoder, TransitionNet, RewardNet
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-env = gym.make('MountainCar-v0')
+#setup environment
+env = gym.make('MetaPendulum-v0')
 if env.action_space.shape:
     dim_actions = env.action_space.shape[0]
     discrete_actions = False
@@ -13,95 +15,105 @@ else:
     discrete_actions = True
 dim_obs = env.observation_space.shape[0] if env.observation_space.shape else 1
 
-print(dim_actions, dim_obs)
-
+#setup buffer
 buffer_size = 10000
 if env.action_space.shape:
     rb = ReplayBuffer(buffer_size,dim_obs,dim_actions)
 else:
     rb = ReplayBuffer(buffer_size,dim_obs,1)
 
+#training hyperparameters
 num_epochs = 5000
 global_iters = 0
 num_train_steps = 50
-train_iters = 50
-
-trans_cov_type='scalar'
-rew_cov = False
-trans_hs=200
-rew_hs=200
-
-max_logvar = 0.5
-
+max_logvar = 1.0
 state_noise = 1e-4
 rew_noise = 1e-4
-
-trans_net = TransitionNet(dim_obs,dim_actions,cov_type=trans_cov_type,hs=trans_hs).to(device)
-rew_net = RewardNet(dim_obs,dim_actions,cov=rew_cov,hs=rew_hs).to(device)
 max_variance = 1.0
 
+#model hyperparameters
+trans_cov_type='scalar'
+trans_hs=200
+
+rew_hs=200
+
+encoder_type = 'single'
+encoder_cov_type='diag'
+encoder_hs = 200
+latent_dim=30
+latent_prior = torch.distributions.MultivariateNormal(torch.zeros(latent_dim),torch.eye(latent_dim))
+
+trans_net = TransitionNet(dim_obs,dim_actions,latent_dim,cov_type=trans_cov_type,hs=trans_hs).to(device)
+rew_net = RewardNet(dim_obs,dim_actions,latent_dim,hs=rew_hs).to(device)
+if encoder_type == 'single':
+    encoder = SingleEncoder(dim_obs,dim_actions,latent_dim,cov_type=encoder_cov_type,hs=encoder_hs)
+#TODO: code multi-step encoder [RNN]
+
+#training parameters
 t_learning_rate = 1e-3
 t_optimizer = torch.optim.Adam(trans_net.parameters(),lr=t_learning_rate)
 
-r_learning_rate = 1e-2
+r_learning_rate = 1e-3
 r_optimizer = torch.optim.Adam(rew_net.parameters(),lr=r_learning_rate)
-batch_size = 128
 
+q_learning_rate = 1e-3
+q_optimizer = torch.optim.Adam(encoder.parameters(),lr=q_learning_rate)
+
+batch_size = 50
+batch_length = 50
+
+#planner hyperparameters
 num_traj = 1000
 traj_length = 30
 num_iters = 5
 elite_frac = 0.1
 
-max_ep_length = 300
-random_episodes = 0
+#TODO: code planner
 
-if env.action_space.shape:
-    init_action_dist = torch.distributions.MultivariateNormal(torch.zeros(dim_actions),torch.from_numpy((env.action_space.high-env.action_space.low)**2)*torch.eye(dim_actions))
-    action_dist = [init_action_dist]*(traj_length-1)
-else:
-    init_action_dist = torch.distributions.Categorical(logits=torch.ones(env.action_space.n))
-    action_dist = [init_action_dist]*(traj_length-1)
-
-policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
-#policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
-
-t_losses = np.array([])
-r_losses = np.array([])
+losses = np.array([])
 rewards = []
 
 for epoch in range(num_epochs):
-    if (rb.size() >= batch_size):
+    if epoch > 0:
         for step in range(num_train_steps):
+            samps = rb.random_sequences(batch_size,batch_length)
+            
+            q_optimizer.zero_grad()
             t_optimizer.zero_grad()
-            samps = rb.random_batch(batch_size)
-            if discrete_actions:
-                a_one_hot = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(samps['a']).long())).float()
-                ins = torch.cat((torch.from_numpy((samps['o'])).float(),a_one_hot),axis=1).to(device)
-            else:
-                ins = torch.cat((torch.from_numpy((samps['o'])).float(),torch.from_numpy(samps['a']).float()),axis=1).to(device)
-            t_outs = trans_net(ins)
-            t_means, t_covs = t_outs[:,:dim_obs], t_outs[:,dim_obs:]
-            #t_loss = torch.nn.MSELoss()(t_means,torch.from_numpy(samps['op']).float())
-            t_loss = torch.mean(-log_transition_probs(t_means,t_covs,torch.from_numpy(samps['op']).float().to(device),cov_type=trans_cov_type))
-            t_loss.backward()
-            #torch.nn.utils.clip_grad_norm(trans_net.parameters(),0.1)
-            t_optimizer.step()
-            t_losses = np.append(t_losses, t_loss.cpu().data.numpy())
-
-            #train reward model
             r_optimizer.zero_grad()
-            r_outs = rew_net(ins)
-            r_loss = torch.nn.MSELoss()(r_outs,torch.from_numpy(samps['r']).float().to(device))
-            r_loss.backward()
+            
+            kl_divs, log_ts, log_rs = torch.zeros(batch_size), torch.zero(batch_size), torch.zeros(batch_size)
+        
+            batch_means, batch_precs, batch_prod_means, batch_prod_precs = [], []
+            for i in range(batch_size):
+                s,a,r,sp = [torch.from_numpy(samps[i][k]).float() for k in ['o','a','r','op']]
+                q_ins = torch.cat((s[:-1],a,r,s[1:]),axis=1)
+                q_outs = encoder(q_ins)
+                q_means = q_outs[:,:latent_dim],
+                q_precs = torch.inverse(get_cov_mat(q_outs[:,latent_dim:],dim_obs,encoder_cov_type,device))
+                batch_means.append(q_means)
+                batch_precs.append(q_precs)
+                means, precs = product_of_gaussians(q_means.view(1,-1,latent_dim),q_precs.view(1,-1,latent_dim,latent_dim))
+                batch_prod_means.append(means)
+                batch_prod_precs.append(precs)
+                
+            means, precs = torch.stack(batch_prod_means), torch.stack(batch_prod_precs)
+            
+            thetas = means + torch.matmul(torch.inverse(precs),torch.randn_like(means))  #shape: [BxL]
+            for i in range(batch_size):
+                
+            
+            
+            loss.backward()
+            
+            q_optimizer.step()
+            t_optimizer.step()
             r_optimizer.step()
-            r_losses = np.append(r_losses, r_loss.cpu().data.numpy())
-    if r_losses.size != 0:
-        print(t_losses[-1],r_losses[-1])
-    action_dist = [init_action_dist]*(traj_length-1)
+
     s, d, ep_rew = env.reset(), False, 0.
     dyn_error, rew_error = 0, 0
     ep_step = 0
-    while not d and ep_step < max_ep_length:
+    while not d:
         #new_action_dist = policy.new_action_dist(np.array(s))
         #if discrete_actions:
             #a = new_action_dist.pop(0).sample().cpu().numpy()

@@ -58,17 +58,14 @@ class TransitionNet(torch.nn.Module):
         return x
 
 class RewardNet(torch.nn.Module):
-    def __init__(self,ns,na,latent_dim,cov=True,hs=100):
+    def __init__(self,ns,na,latent_dim,hs=100):
         super(RewardNet, self).__init__()
         self.fc1 = torch.nn.Linear(ns+na+latent_dim, hs)
         self.fc2 = torch.nn.Linear(hs, hs)
         self.relu = torch.nn.ReLU()
         self.bn = torch.nn.BatchNorm1d(hs)
         self.ln = torch.nn.LayerNorm(hs)
-        if cov:
-            self.fc3 = torch.nn.Linear(hs,2)
-        else:
-            self.fc3 = torch.nn.Linear(hs,1)
+        self.fc3 = torch.nn.Linear(hs,2)
             
     def forward(self, x):
         x = self.fc1(x)

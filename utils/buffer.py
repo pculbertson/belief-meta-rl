@@ -44,6 +44,10 @@ class ReplayBuffer:
         """returns buffer size"""
         return self._size
     
+    def num_episodes(self):
+        """returns number of episodes in buffer"""
+        return len(self._ep_starts)
+    
     def sample_data(self,indices):
         """returns dictionary of (o,a,r,o',d) samples @ specified indices"""
         return dict(
@@ -63,9 +67,10 @@ class ReplayBuffer:
         """samples batch of [batch_size] sequences; returns full episode if [seq_length] = -1"""
         sequences = []
         for i in range(batch_size):
-            ep_num = random.randint(0,len(self._ep_starts)-1)
+            ep_num = random.randint(0,len(self._ep_starts)-1) #choose random episode
             ep_start = self._ep_starts[ep_num]
             if seq_length == -1: #full episode length
+                seq_start = ep_start
                 if (ep_num == len(self._ep_starts)-1):
                     #handle episode wraparound
                     if (self._size == self._max_replay_buffer_size):
@@ -74,18 +79,24 @@ class ReplayBuffer:
                         ep_range = list(range(ep_start,self._top))
                 else: 
                     ep_range = list(range(ep_start,self._ep_starts[ep_num+1]))
-            else:
+            else: #fixed-length sequence
                 if (ep_num == len(self._ep_starts)-1):
-                    if (self._size == self._max_replay_buffer_size):
-                        if self._size - ep_start >= seq_length:
+                    if (self._size == self._max_replay_buffer_size): #buffer overflowing
+                        ep_length = self._size - ep_start + self.ep_starts[0]
+                        if ep_length <= seq_length:
+                            seq_length = ep_length
+                            seq_start = ep_start
+                        else:
+                            seq_start = random.choice(0,ep_length-seq_length)
+                        ep_range = [n % self._size for n in range(seq_start,seq_start + seq_length)]
+                    else:
+                        ep_length = self._top - ep_start
+                        if ep_length <= seq_length:
+                            seq_length = ep_length
                             ep_range = list(range(ep_start,ep_start+seq_length))
                         else:
-                            remainder = seq_length - (self._size - ep_start)
-                            ep_end = min(remainder,self._ep_starts[0])
-                            ep_range = list(range(ep_start,self._size)) + list(range(0,ep_end))
-                    else:
-                        ep_end = min(ep_start+seq_length,self._top)
-                        ep_range = list(range(ep_start,ep_end))
+                            seq_start = random.choice(range(0,ep_length-seq_length))
+                            ep_range = list(range(seq_start,seq_start+seq_length))
                 else:
                     ep_end = min(ep_start+seq_length,self._ep_starts[ep_num+1])
                     ep_range = list(range(ep_start,ep_end))

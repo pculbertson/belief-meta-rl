@@ -75,3 +75,35 @@ class RewardNet(torch.nn.Module):
         x = self.relu(x)
         x = self.fc3(x)
         return x
+    
+class LSTMEncoder(torch.nn.Module):
+    def __init__(self,ns,na,latent_dim,hs=200,num_layers=2,cov_type='diag',batch_first=True):
+        super(LSTMEncoder, self).__init__()
+        self.layers = num_layers
+        self.hs = hs
+        self.latent_dim = latent_dim
+        self.LSTM = torch.nn.LSTM(2*ns+na+1,hs,num_layers,batch_first=batch_first)
+        self.relu = torch.nn.ReLU()
+        if cov_type=='diag': #one std-dev parameter for each dim
+            self.linear = torch.nn.Linear(hs, 2*latent_dim)
+        elif cov_type=='scalar': #uniform standard deviation
+            self.linear = torch.nn.Linear(hs, latent_dim+1)
+        elif cov_type=='dense': #full, dense covariance matrix
+            self.linear = torch.nn.Linear(hs, latent_dim+(latent_dim*((latent_dim+1))/2)) #need latent + latent'th triangle num.
+        elif cov_type=='fixed': #use standard covariance
+            self.linear = torch.nn.Linear(hs,latent_dim)
+        else:
+            raise ValueException('invalid covariance type')
+            
+    def forward(self, x, hidden=None):
+        if hidden is None:
+            batch_size = x.shape[0]
+            hidden = self.init_hidden(batch_size)
+        x, hidden = self.LSTM(x,hidden)
+        x = self.linear(self.relu(x))
+        return x, hidden
+    
+    def init_hidden(self,batch_size):
+        h0 = torch.zeros(self.layers,batch_size,self.hs)
+        c0 = torch.zeros(self.layers,batch_size,self.hs)
+        return (h0,c0)

@@ -49,7 +49,7 @@ def product_of_gaussians(means,prec_mats):
     """return (normalized) Gaussian PDFs of the products of K Multivariate Gaussians of dim N
        inputs: means (of shape [,K,N]), and prec_mats (of shape [,K,N,N])"""
     prec_mat = torch.sum(prec_mats,1)
-    mean = torch.matmul(torch.inverse(prec_mat),torch.sum(torch.matmul(prec_mats,means.unsqueeze(3)),1))
+    mean = torch.matmul(torch.inverse(prec_mat),torch.sum(torch.matmul(prec_mats,means),1))
     return mean, prec_mat
     
 def gaussian_product_posterior(mean_prior,prec_prior,new_mean,new_prec):

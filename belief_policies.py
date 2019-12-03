@@ -115,7 +115,7 @@ class LSTMRandomShooting():
             else:
                 actions_input = actions[:,:,i]
             
-            codes = torch.squeeze(code_means+torch.matmul(code_covs,torch.randn_like(code_means)))
+            codes = torch.squeeze(code_means+torch.matmul(torch.inverse(code_precs),torch.randn_like(code_means)))
             
             states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i],actions_input,codes)
             

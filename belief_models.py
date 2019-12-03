@@ -104,6 +104,7 @@ class LSTMEncoder(torch.nn.Module):
         return x, hidden
     
     def init_hidden(self,batch_size):
+        #note:does not work with GPU
         h0 = torch.zeros(self.layers,batch_size,self.hs)
         c0 = torch.zeros(self.layers,batch_size,self.hs)
         return (h0,c0)

@@ -8,7 +8,7 @@ from .mb_policies import RandomShooting, CrossEntropy
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-env = gym.make('MountainCar-v0')
+env = gym.make('Pendulum-v0')
 #env = gym.make('SemisuperPendulumNoise-v0')
 if env.action_space.shape:
     dim_actions = env.action_space.shape[0]
@@ -33,8 +33,8 @@ train_iters = 50
 
 trans_cov_type='scalar'
 rew_cov = False
-trans_hs=200
-rew_hs=200
+trans_hs=32
+rew_hs=32
 
 max_logvar = 0.5
 
@@ -52,10 +52,10 @@ r_learning_rate = 1e-2
 r_optimizer = torch.optim.Adam(rew_net.parameters(),lr=r_learning_rate)
 batch_size = 128
 
-num_traj = 1000
+num_traj = 200
 traj_length = 30
-num_iters = 5
-elite_frac = 0.1
+num_iters = 10
+elite_frac = 0.15
 
 max_ep_length = 300
 random_episodes = 0
@@ -67,8 +67,8 @@ else:
     init_action_dist = torch.distributions.Categorical(logits=torch.ones(env.action_space.n))
     action_dist = [init_action_dist]*(traj_length-1)
 
-policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
-#policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
+#policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
+policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
 
 t_losses = np.array([])
 r_losses = np.array([])
@@ -118,7 +118,12 @@ for epoch in range(num_epochs):
         if epoch < random_episodes:
             a = np.array(env.action_space.sample())
         else:
-            a = policy.get_action(s)
+            #a = policy.get_action(s)
+            new_action_dist = policy.new_action_dist(np.array(s))
+            a = new_action_dist.pop(0).sample().cpu().numpy()
+            new_action_dist.append(init_action_dist)
+            policy.set_action_dist(new_action_dist)
+            
         if env.action_space.shape:
             sp, r, d, _ = env.step(a) # take a random action
         else:

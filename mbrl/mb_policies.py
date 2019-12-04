@@ -99,6 +99,8 @@ class CrossEntropy():
             #take elite fraction, refit action distributions
             total_rew = torch.sum(rewards,1)
             elite_indices = torch.argsort(total_rew,descending=True)[:self._num_elite]
+            if iteration == 0 or iteration == self._num_iters-1:
+                print('iter: ', iteration, ' rew: ', torch.mean(total_rew[elite_indices]))
             curr_action_dist = self._fit_action_dists(actions[elite_indices,:,:])
         return curr_action_dist
     

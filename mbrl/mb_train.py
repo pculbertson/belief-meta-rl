@@ -33,10 +33,10 @@ train_iters = 50
 
 trans_cov_type='scalar'
 rew_cov = False
-trans_hs=32
-rew_hs=32
+trans_hs=300
+rew_hs=30
 
-max_logvar = 0.5
+max_logvar = 10.
 
 state_noise = 1e-4
 rew_noise = 1e-4
@@ -53,22 +53,23 @@ r_optimizer = torch.optim.Adam(rew_net.parameters(),lr=r_learning_rate)
 batch_size = 128
 
 num_traj = 200
-traj_length = 30
-num_iters = 10
-elite_frac = 0.15
+traj_length = 20
+num_iters = 1
+elite_frac = 0.3
+smoothing = 0.1
 
-max_ep_length = 300
-random_episodes = 0
+max_ep_length = 200
+random_episodes = 10
 
 if env.action_space.shape:
-    init_action_dist = torch.distributions.MultivariateNormal(torch.zeros(dim_actions),torch.from_numpy((env.action_space.high-env.action_space.low)**2)*torch.eye(dim_actions))
+    init_action_dist = torch.distributions.MultivariateNormal(torch.zeros(dim_actions),torch.from_numpy((env.action_space.high-env.action_space.low)*2)*torch.eye(dim_actions))
     action_dist = [init_action_dist]*(traj_length-1)
 else:
     init_action_dist = torch.distributions.Categorical(logits=torch.ones(env.action_space.n))
     action_dist = [init_action_dist]*(traj_length-1)
 
-#policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
-policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, device)
+policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
+#policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, smoothing, device)
 
 t_losses = np.array([])
 r_losses = np.array([])
@@ -86,8 +87,9 @@ for epoch in range(num_epochs):
                 ins = torch.cat((torch.from_numpy((samps['o'])).float(),torch.from_numpy(samps['a']).float()),axis=1).to(device)
             t_outs = trans_net(ins)
             t_means, t_covs = t_outs[:,:dim_obs], t_outs[:,dim_obs:]
+            t_covs = torch.clamp(t_covs,-max_logvar,max_logvar)
             #t_loss = torch.nn.MSELoss()(t_means,torch.from_numpy(samps['op']).float())
-            t_loss = torch.mean(-log_transition_probs(t_means,t_covs,torch.from_numpy(samps['op']).float().to(device),cov_type=trans_cov_type))
+            t_loss = torch.mean(-log_transition_probs(t_means,t_covs,torch.from_numpy(samps['op']-samps['o']).float().to(device),cov_type=trans_cov_type))
             t_loss.backward()
             #torch.nn.utils.clip_grad_norm(trans_net.parameters(),0.1)
             t_optimizer.step()
@@ -118,11 +120,11 @@ for epoch in range(num_epochs):
         if epoch < random_episodes:
             a = np.array(env.action_space.sample())
         else:
-            #a = policy.get_action(s)
-            new_action_dist = policy.new_action_dist(np.array(s))
-            a = new_action_dist.pop(0).sample().cpu().numpy()
-            new_action_dist.append(init_action_dist)
-            policy.set_action_dist(new_action_dist)
+            a = policy.get_action(s)            
+            #new_action_dist = policy.new_action_dist(np.array(s))
+           # a = new_action_dist.pop(0).mean.cpu().numpy()
+            #new_action_dist.append(init_action_dist)
+            #policy.set_action_dist(new_action_dist)
             
         if env.action_space.shape:
             sp, r, d, _ = env.step(a) # take a random action
@@ -132,6 +134,8 @@ for epoch in range(num_epochs):
         sp_n = sp+np.random.multivariate_normal(np.zeros(dim_obs),state_noise*np.eye(dim_obs))
         r_n = r+np.random.normal(0.,rew_noise)
         rb.add_sample(s_n,a,r_n,sp_n,d)
+        #if epoch >= random_episodes:
+            #print('sp: ', sp, ' r: ', r)
         
         if discrete_actions:
             a_one_hot = torch.squeeze(torch.nn.functional.one_hot(torch.from_numpy(a).long(),num_classes=dim_actions)).float()
@@ -142,7 +146,7 @@ for epoch in range(num_epochs):
         t_mean, t_cov =  t_out[:dim_obs], t_out[dim_obs:]
         r_out = torch.squeeze(rew_net(net_in))
         
-        dyn_error += torch.nn.MSELoss()(t_mean,torch.from_numpy(sp).float().to(device))
+        dyn_error += torch.nn.MSELoss()(t_mean,torch.from_numpy(sp-s).float().to(device))
         rew_error += torch.nn.MSELoss()(r_out,torch.from_numpy(np.array(r)).float().to(device))
         
         s = sp

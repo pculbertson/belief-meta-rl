@@ -14,7 +14,6 @@ def get_batch_mvnormal(means, covs, cov_type='diag',device="cpu"):
     elif cov_type=='scalar':
         batch_size, ns = covs.shape[0], means.shape[1]
         cov_mat = torch.exp(covs.to(device)).reshape(batch_size,1,1)*(torch.eye(ns).to(device))
-        print(cov_mat.shape)
         batch_mvnormal = torch.distributions.MultivariateNormal(means.to(device),cov_mat)
     elif cov_type=='fixed':
         cov_mat = covs

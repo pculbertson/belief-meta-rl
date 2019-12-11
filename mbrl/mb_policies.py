@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from utils.distributions import get_batch_mvnormal, get_cov_mat
+from utils.env_utils import true_next_state_rew, pendulum_next_state_rew
 
 class RandomShooting():
     """implements random shooting for MBRL"""
@@ -62,7 +63,7 @@ class RandomShooting():
     
 class CrossEntropy():
     """implements cross-entropy method for MBRL"""
-    def __init__(self, transition, reward, action_dist, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov, max_logvar, smoothing, device):
+    def __init__(self, transition, reward, action_dist, num_traj, traj_length, num_iters, elite_frac, ns, na, t_cov_type, r_cov, max_logvar, smoothing, device, true_dyn=False, env=None):
         self._transition = transition
         self._reward = reward
         self._action_dist = action_dist #list of action distributions
@@ -78,11 +79,13 @@ class CrossEntropy():
         self._max_logvar = max_logvar
         self._smoothing = smoothing
         self._device = device
+        self._true_dyn = true_dyn
+        self._env = env
         if type(self._action_dist[0]) == torch.distributions.Categorical:
             self._discrete_action = True
         else:
             self._discrete_action = False
-        
+
     def new_action_dist(self, state):
         #print([dist.covariance_matrix for dist in self._action_dist])
         curr_action_dist = self._action_dist
@@ -111,12 +114,18 @@ class CrossEntropy():
                 #print('iter: ', iteration, ' rew: ', torch.mean(total_rew[elite_indices]))
                 #print('sp_hat: ', torch.mean(states[elite_indices,:,1],axis=0), ' r_hat: ', torch.mean(rewards[elite_indices,0]))
             curr_action_dist = self._fit_action_dist(actions[elite_indices,:,:],curr_action_dist)
+        #sp, r = pendulum_next_state_rew(states[:,:,0],curr_action_dist[0].mean,self._env)
+        #print(sp[0,:],curr_action_dist[0].mean,r[0])
+        #print(np.arccos(states[0,0,0].numpy()),states[0,2,0].numpy())
         return curr_action_dist
     
     def set_action_dist(self,action_dist):
         self._action_dist = action_dist
         
     def _next_state_rew(self, states, actions):
+        if self._true_dyn:
+            sp, r = pendulum_next_state_rew(states,actions,self._env)
+            return torch.from_numpy(sp).float(), torch.from_numpy(r).float()
         if self._discrete_action:
             pass
         else:

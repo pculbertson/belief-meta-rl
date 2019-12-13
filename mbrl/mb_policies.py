@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from utils.distributions import get_batch_mvnormal, get_cov_mat
-from utils.env_utils import true_next_state_rew, pendulum_next_state_rew
+from utils.env_utils import pendulum_next_state_rew
 
 class RandomShooting():
     """implements random shooting for MBRL"""
@@ -92,7 +92,7 @@ class CrossEntropy():
         for iteration in range(self._num_iters):
             states = torch.zeros([self._num_traj,self._ns,self._traj_length])
             states[:,:,0] = torch.from_numpy(state).float().to(self._device)
-
+            
             #sample action distribution
             if self._discrete_action:
                 actions = torch.cat([dist.expand((self._num_traj,1)).sample() for dist in curr_action_dist],axis=1)
@@ -158,8 +158,89 @@ class CrossEntropy():
             action_variances = torch.squeeze(torch.var(elite_actions,0))
             for t in range(self._traj_length-1):
                 new_mean = (1-self._smoothing)*action_means[:,t] + self._smoothing*prev_dist[t].mean
-                new_var = (1-self._smoothing)*action_variances[t]*torch.eye(self._na) + self._smoothing*prev_dist[t].covariance_matrix
+                new_var = (1-self._smoothing)*action_variances[t]*torch.eye(self._na) + self._smoothing*(prev_dist[t].covariance_matrix+ torch.eye(self._na))
                 action_dist.append(torch.distributions.MultivariateNormal(new_mean,new_var))
             #action_dist = [torch.distributions.MultivariateNormal(action_means[:,t],torch.eye(self._na)) for t in range(self._traj_length-1)]
         return action_dist
                 
+class Scenario():
+    """implements cross-entropy method for MBRL"""
+    def __init__(self, transition, reward, action_dist, a_opt, num_traj, traj_length, num_iters, ns, na, t_cov_type, r_cov, a_cov_type, max_logvar, device, true_dyn=False, env=None):
+        self._transition = transition
+        self._reward = reward
+        self._action_dist = action_dist #should be a Torch variable of size n_traj x na + na_cov
+        self._a_opt = a_opt
+        self._num_traj = num_traj
+        self._traj_length = traj_length
+        self._num_iters = num_iters
+        self._ns = ns
+        self._na = na
+        self._t_cov_type = t_cov_type
+        self._r_cov = r_cov
+        self._a_cov_type = a_cov_type
+        self._max_logvar = max_logvar
+        self._device = device
+        self._true_dyn = true_dyn
+        self._env = env
+        if type(self._action_dist[0]) == torch.distributions.Categorical:
+            self._discrete_action = True
+        else:
+            self._discrete_action = False
+
+    def new_action_dist(self, state):
+        """take in current state, roll out scenarios & take gradient step on policy"""
+        curr_action_dist = self._action_dist
+        orig_action_dist = curr_action_dist.data.detach().cpu().numpy()
+        for iteration in range(self._num_iters):
+            self._a_opt.zero_grad()
+            states = torch.zeros([self._num_traj,self._ns,self._traj_length])
+            states[:,:,0] = torch.from_numpy(state).float().to(self._device)
+            
+            action_means = curr_action_dist[:self._na,:].view(1,self._traj_length-1,self._na,1).expand(self._num_traj,self._traj_length-1,self._na,1)
+            action_covs = get_cov_mat(self._action_dist[self._na:,:].view(-1,self._na),self._na,self._a_cov_type,self._device).expand(self._num_traj,self._traj_length-1,self._na,self._na)
+            
+            actions = action_means# + torch.matmul(action_covs,torch.randn_like(action_means)).to(self._device)
+            
+            #shoot trajectories forward, get rewards
+            rewards = torch.zeros([self._num_traj,self._traj_length-1])
+            for i in range(self._traj_length-1):
+                states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i].to(self._device),actions[:,i,:].view(self._num_traj,self._na))
+            #take elite fraction, refit action distributions
+            loss = torch.mean(rewards**2)
+            print(loss)
+            loss.backward()
+            self._a_opt.step()
+            
+        #print(pendulum_next_state_rew(states[0,:,0].view(1,self._ns),curr_action_dist[:self._na,0].view(1,self._na),self._env))
+        print(torch.norm(curr_action_dist-torch.from_numpy(orig_action_dist).float().cuda()))
+        return curr_action_dist
+    
+    def set_action_dist(self,action_dist):
+        self._action_dist = action_dist
+        
+    def _next_state_rew(self, states, actions):
+        if self._true_dyn:
+            sp, r = pendulum_next_state_rew(states,actions,self._env)
+            #return torch.from_numpy(sp.cpu()).float(), torch.from_numpy(r).float()
+            return sp, r
+        if self._discrete_action:
+            pass
+        else:
+            ins = torch.cat((states,actions),axis=1).to(self._device)
+            t_out = self._transition(ins)
+            r_outs = self._reward(ins)
+            
+            t_means, t_covs = t_out[:,:self._ns], t_out[:,self._ns:]
+            t_covs_clamped = torch.clamp(t_covs,-self._max_logvar,self._max_logvar).to(self._device)
+            cov_mat = get_cov_mat(t_covs_clamped,self._ns,self._t_cov_type,self._device)
+            
+            #sp = t_means.to(self._device) + states.to(self._device)
+            sp = t_means + torch.squeeze(torch.matmul(cov_mat,torch.randn_like(t_means).view(self._num_traj,self._ns,1))) + states.to(self._device)
+            
+            if self._r_cov:
+                r_logvar_clamped = torch.clamp(r_outs[:,1],-self._max_logvar,self._max_logvar).to(self._device)
+                rews = torch.distributions.Normal(r_outs[:,0],torch.exp(r_logvar_clamped)).rsample()
+            else:
+                rews = r_outs
+            
+            return (sp, torch.squeeze(rews))

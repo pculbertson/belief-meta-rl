@@ -1,10 +1,10 @@
 import gym, torch
 import numpy as np
 from utils.buffer import ReplayBuffer
-from utils.distributions import log_transition_probs, log_rew_probs
+from utils.distributions import log_transition_probs, log_rew_probs, get_cov_mat
 from utils.misc import eval_policy
 from .mb_models import TransitionNet, RewardNet
-from .mb_policies import RandomShooting, CrossEntropy
+from .mb_policies import RandomShooting, CrossEntropy, Scenario
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -28,13 +28,13 @@ else:
 
 num_epochs = 5000
 global_iters = 0
-num_train_steps = 100
+num_train_steps = 50
 train_iters = 50
 
 trans_cov_type='scalar'
 rew_cov = False
 trans_hs=300
-rew_hs=100
+rew_hs=20
 
 max_logvar = 10.
 
@@ -48,30 +48,32 @@ max_variance = 1.0
 t_learning_rate = 1e-3
 t_optimizer = torch.optim.Adam(trans_net.parameters(),lr=t_learning_rate)
 
-r_learning_rate = 1e-2
+r_learning_rate = 2e-3
 r_optimizer = torch.optim.Adam(rew_net.parameters(),lr=r_learning_rate)
 batch_size = 256
 
-num_traj = 500
+num_traj = 200
 #traj_length = 12
-traj_length = 15
-num_iters = 5
-elite_frac = 0.1
-smoothing = 0.01
+traj_length = 50
+num_iters = 10
+
+a_lr = 1.
+init_action_dist = torch.cat((torch.zeros((dim_actions,traj_length-1)),
+    torch.ones((dim_actions,traj_length-1))),axis=0).data.to(device)
+action_dist = torch.autograd.Variable(init_action_dist,requires_grad=True)
+action_cov_type = 'diag'
+a_opt = torch.optim.Adam([action_dist],lr=a_lr)
 
 max_ep_length = 200
-random_episodes = 10
-print(dim_actions)
+random_episodes = 1
 
 if env.action_space.shape:
     init_action_dist = torch.distributions.MultivariateNormal(torch.zeros(dim_actions),torch.from_numpy((env.action_space.high-env.action_space.low)*1.)*torch.eye(dim_actions))
-    action_dist = [init_action_dist]*(traj_length-1)
 else:
     init_action_dist = torch.distributions.Categorical(logits=torch.ones(env.action_space.n))
-    action_dist = [init_action_dist]*(traj_length-1)
 
-#policy = RandomShooting(trans_net,rew_net,action_dist[0],num_traj,traj_length,dim_obs,dim_actions,trans_cov_type,rew_cov,max_logvar,device,det=False)
-policy = CrossEntropy(trans_net, rew_net, action_dist, num_traj, traj_length, num_iters, elite_frac, dim_obs, dim_actions, trans_cov_type, rew_cov, max_logvar, smoothing, device)
+#policy = Scenario(trans_net, rew_net, action_dist, a_opt, num_traj, traj_length, num_iters, dim_obs, dim_actions, trans_cov_type, rew_cov, action_cov_type, max_logvar, device)
+policy = Scenario(trans_net, rew_net, action_dist, a_opt, num_traj, traj_length, num_iters, dim_obs, dim_actions, trans_cov_type, rew_cov, action_cov_type, max_logvar, device,true_dyn=True,env=env)
 
 t_losses = np.array([])
 r_losses = np.array([])
@@ -126,10 +128,17 @@ for epoch in range(num_epochs):
         if epoch < random_episodes:
             a = np.array(env.action_space.sample())
         else:
+            #print(s)
             action_dist = policy.new_action_dist(s)
-            #a = action_dist.pop(0).sample().cpu().numpy()
-            a = action_dist.pop(0).sample().cpu().numpy()
+            a = action_dist[:dim_actions,0]
+            a = a + torch.matmul(get_cov_mat(action_dist[dim_actions:,0].view(1,-1,dim_actions),dim_actions,action_cov_type,device),torch.randn_like(a))
+            a = a.view(dim_actions).detach().cpu().numpy()
+
             print(r)
+            new_action_dist = torch.cat((action_dist[:dim_actions,1].view(dim_actions,1),
+                                                                 torch.ones((dim_actions,1),requires_grad=True).to(device)),axis=0)
+            action_dist = torch.autograd.Variable(torch.cat((action_dist[:,1:],new_action_dist),axis=1),requires_grad=True)
+            policy.set_action_dist(action_dist)
         
         if env.action_space.shape:
             sp, r, d, _ = env.step(a) # take a random action
@@ -155,25 +164,6 @@ for epoch in range(num_epochs):
         rew_error += torch.nn.MSELoss()(r_out,torch.from_numpy(np.array(r)).float().to(device))
         
         s = sp
-        
-        if epoch >= random_episodes:
-            action_dist = [torch.distributions.MultivariateNormal(dist.mean,10.*dist.covariance_matrix) for dist in action_dist]
-            action_dist.append(torch.distributions.MultivariateNormal(action_dist[-1].mean,init_action_dist.covariance_matrix))
-            policy.set_action_dist(action_dist)
-        
-        #action_dist.append(init_action_dist)
-        #policy.set_action_dist(action_dist)
-        
-        #if (rb.size() >= batch_size) and (global_iters % train_iters == 0):
-            #train transition model
-            
-            
-            #if global_iters % print_freq == 0:
-                #print(eval_policy(env,policy,init_action_dist,traj_length,discrete_actions,10))
-                #if rewards:
-                    #print(t_loss.data,r_loss.data, rewards[-1])
-                #else:
-                    #print(t_loss.data,r_loss.data)
                     
         ep_rew += r
         global_iters += 1

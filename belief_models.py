@@ -105,6 +105,6 @@ class LSTMEncoder(torch.nn.Module):
     
     def init_hidden(self,batch_size):
         #note:does not work with GPU
-        h0 = torch.zeros(self.layers,batch_size,self.hs)
-        c0 = torch.zeros(self.layers,batch_size,self.hs)
+        h0 = torch.zeros(self.layers,batch_size,self.hs).cuda().contiguous()
+        c0 = torch.zeros(self.layers,batch_size,self.hs).cuda().contiguous()
         return (h0,c0)

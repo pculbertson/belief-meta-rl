@@ -89,15 +89,14 @@ class LSTMRandomShooting():
         else:
             actions = self._action_dist.expand((self._num_traj,1)).sample([self._traj_length-1]).view(self._num_traj,self._na,self._traj_length-1).to(self._device)
         rewards = torch.zeros([self._num_traj,self._traj_length-1]).to(self._device)
-        #code_means, code_precs = torch.zeros(self._num_traj,self._latent_dim,1).to(self._device), torch.eye(self._latent_dim).expand(self._num_traj,self._latent_dim,self._latent_dim).to(self._device)
         for i in range(self._traj_length-1):
             if type(self._action_dist) == torch.distributions.Categorical:
                 actions_input = torch.squeeze(torch.nn.functional.one_hot(actions[:,:,i]).float())
             else:
                 actions_input = actions[:,:,i]
             
-            #deterministic codes
-            codes = torch.squeeze(code_means)#+torch.matmul(torch.inverse(code_precs),torch.randn_like(code_means)))
+            codes = code_means.expand(self._num_traj,self._latent_dim,1).cuda()+torch.matmul(torch.inverse(code_precs).cuda(),torch.randn(self._num_traj,self._latent_dim,1).cuda())
+            codes = codes.view(self._num_traj,self._latent_dim)
             
             states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i],actions_input,codes)
             
@@ -115,6 +114,7 @@ class LSTMRandomShooting():
         
     def _next_state_rew(self, states, actions, codes):
         """helper function to unroll dynamics (batched)"""
+        #print(states.shape,actions.shape,codes.shape)
         ins = torch.cat((states,actions,codes),axis=1).to(self._device)
         t_outs = self._transition(ins)
         t_means, t_covs = t_outs[:,:self._ns], t_outs[:,self._ns:]
@@ -132,6 +132,53 @@ class LSTMRandomShooting():
             else:
                 rews = r_outs[:,0]
         return (sp, torch.squeeze(rews))
+    
+    def rollout(self,state,hidden,action_seq,roll_length,num_roll,init_code_mean,
+                init_code_prec,policy=None,resample_belief=False):
+        
+        states = torch.zeros([num_roll,self._ns,roll_length]).to(self._device)
+        states[:,:,0] = torch.from_numpy(state).float().to(self._device)
+        
+        if policy:
+            actions = torch.zeros(num_roll,self._na,roll_length).to(self._device)
+        else:
+            actions = action_seq
+        
+        rewards = torch.zeros([num_roll,roll_length-1]).to(self._device)
+        
+        if resample_belief:
+            code_means = torch.zeros(num_roll,roll_length,self._latent_dim,1)
+            code_precs = torch.zeros(num_roll,roll_length,self._latent_dim,self._latent_dim)
+            code_means[:,0,:,:] = init_code_mean
+            code_precs[:,0,:,:] = init_code_prec
+            codes = torch.zeros(num_roll,self._latent_dim,roll_length)
+            codes[:,:,0] = init_code_mean.expand(num_roll,self._latent_dim) + \
+                torch.squeeze(torch.matmul(
+                torch.inverse(init_code_prec).expand(num_roll,self._latent_dim,self._latent_dim),
+                torch.randn(num_roll,self._latent_dim,1)))
+        else:
+            codes = init_code_mean.expand(num_roll,self._latent_dim) \
+                + torch.squeeze(torch.matmul(
+                    torch.inverse(init_code_prec).expand(num_roll,self._latent_dim,self._latent_dim),
+                    torch.randn(num_roll,self._latent_dim,1)))
+            codes = codes.expand(num_roll,self._latent_dim,roll_length)
+        
+        for i in range(self._traj_length-1):
+            if policy:
+                actions[:,:,i] = policy(states[:,:,i])
+            if resample_belief:
+                pass
+                                
+            
+            states[:,:,i+1], rewards[:,i] = self._next_state_rew(states[:,:,i],actions[:,:,i],codes[:,:,i])
+            
+            q_ins = torch.cat((states[:,:,i],actions[:,:,i],rewards[:,i].unsqueeze(1),states[:,:,i+1]),axis=1).view(self._num_traj,1,-1).to(self._device)
+            q_outs, hidden = self._encoder(q_ins,hidden)
+            new_means = torch.squeeze(q_outs)[:,:self._latent_dim].unsqueeze(-1) 
+            new_precs = torch.inverse(get_cov_mat(torch.squeeze(q_outs)[:,self._latent_dim:],self._ns,self._q_cov_type,self._device))
+            code_means[:,i+1,:,:], code_precs[:,i+1,:,:] = gaussian_product_posterior(code_means,code_precs,new_means,new_precs)
+                
+        return states, rewards, code_means, code_precs
     
     
 class CrossEntropy():
